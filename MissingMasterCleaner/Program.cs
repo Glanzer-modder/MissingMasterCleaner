@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Microsoft.Win32;
+using System.Windows.Forms;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
@@ -26,6 +27,7 @@ namespace MissingMasterCleaner
         static readonly string LogPath = Path.Combine(AppContext.BaseDirectory, "MissingMasterCleaner.log");
         static readonly StringBuilder Log = new();
 
+        [STAThread]
         static void Main(string[] args)
         {
             try
@@ -307,6 +309,9 @@ namespace MissingMasterCleaner
                     hitsForThisSection = hits
                         .Where(h => !safeOwnedReferencedKeys.Contains(h.ReferencedFormKey))
                         .ToList();
+
+                    // NEW: drop hits that are inside a removable placed ref (Persistent[n]/Temporary[n])
+                    hitsForThisSection = FilterHitsInsideRemovablePlacedRefs(record, missingMaster, hitsForThisSection);
                 }
 
                 if (hitsForThisSection.Count == 0)
@@ -641,6 +646,73 @@ namespace MissingMasterCleaner
             }
         }
 
+        static List<LinkHit> FilterHitsInsideRemovablePlacedRefs(
+            IMajorRecordGetter record,
+            ModKey missingMaster,
+            List<LinkHit> hits)
+        {
+            if (hits.Count == 0)
+                return hits;
+
+            static bool TryExtractIndex(string path, string token, out int idx)
+            {
+                idx = -1;
+                int p = path.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+                if (p < 0) return false;
+
+                p += token.Length;
+                int end = path.IndexOf(']', p);
+                if (end < 0) return false;
+
+                return int.TryParse(path.AsSpan(p, end - p), out idx) && idx >= 0;
+            }
+
+            static bool IsPlacedRefOwnedByMissingMaster(IReadOnlyList<IPlacedGetter> list, int index, ModKey mm)
+            {
+                if ((uint)index >= (uint)list.Count) return false;
+                return list[index].FormKey.ModKey == mm;
+            }
+
+            var result = new List<LinkHit>(hits.Count);
+
+            foreach (var h in hits)
+            {
+                int pIdx = -1;
+                int tIdx = -1;
+
+                bool isPersistent = TryExtractIndex(h.Path, "Persistent[", out pIdx);
+                bool isTemporary = !isPersistent && TryExtractIndex(h.Path, "Temporary[", out tIdx);
+
+                bool skip = false;
+
+                if (record is ICellGetter cell)
+                {
+                    if (isPersistent && cell.Persistent != null && IsPlacedRefOwnedByMissingMaster(cell.Persistent, pIdx, missingMaster))
+                        skip = true;
+                    else if (isTemporary && cell.Temporary != null && IsPlacedRefOwnedByMissingMaster(cell.Temporary, tIdx, missingMaster))
+                        skip = true;
+                }
+                else if (record is IWorldspaceGetter ws)
+                {
+                    // Worldspace persistent/temporary refs hang off TopCell in SSE
+                    var top = ws.TopCell;
+                    if (top != null)
+                    {
+                        if (isPersistent && top.Persistent != null && IsPlacedRefOwnedByMissingMaster(top.Persistent, pIdx, missingMaster))
+                            skip = true;
+                        else if (isTemporary && top.Temporary != null && IsPlacedRefOwnedByMissingMaster(top.Temporary, tIdx, missingMaster))
+                            skip = true;
+                    }
+                }
+
+                if (!skip)
+                    result.Add(h);
+            }
+
+            return result;
+        }
+
+
         // -------------------------------------------------
         // Logging / Exit
         // -------------------------------------------------
@@ -665,26 +737,95 @@ namespace MissingMasterCleaner
         // -------------------------------------------------
         static string? DetectDataDirectory()
         {
+            // 1) Try registry first
             using var key = Registry.LocalMachine.OpenSubKey(
                 @"SOFTWARE\WOW6432Node\Bethesda Softworks\Skyrim Special Edition");
 
             var installPath = key?.GetValue("Installed Path") as string;
-            if (installPath == null)
+
+            if (!string.IsNullOrWhiteSpace(installPath))
             {
-                LogLine("ERROR: Skyrim SE install path not found.");
-                return null;
+                var dataDir = Path.Combine(installPath, "Data");
+                if (IsValidSkyrimDataDirectory(dataDir))
+                {
+                    LogLine($"Detected Data directory from registry: {dataDir}");
+                    LogLine("");
+                    return dataDir;
+                }
             }
 
-            var dataDir = Path.Combine(installPath, "Data");
-            if (!Directory.Exists(dataDir))
-            {
-                LogLine("ERROR: Data directory not found.");
-                return null;
-            }
-
-            LogLine($"Detected Data directory: {dataDir}");
+            LogLine("Skyrim SE Data directory not found automatically.");
             LogLine("");
-            return dataDir;
+
+            // 2) Manual selection loop
+            while (true)
+            {
+                var selectedPath = PromptUserForDataDirectory();
+
+                if (selectedPath == null)
+                {
+                    LogLine("User cancelled. Exiting.");
+                    return null;
+                }
+
+                if (IsValidSkyrimDataDirectory(selectedPath))
+                {
+                    LogLine($"Using Data directory: {selectedPath}");
+                    LogLine("");
+                    return selectedPath;
+                }
+
+                MessageBox.Show(
+                    text: "The selected folder is not a valid Skyrim Data directory.\n\nIt must contain Skyrim.esm.",
+                    caption: "Invalid Data Directory",
+                    buttons: MessageBoxButtons.OK,
+                    icon: MessageBoxIcon.Error,
+                    defaultButton: MessageBoxDefaultButton.Button1,
+                    options: MessageBoxOptions.DefaultDesktopOnly
+                );
+
+
+
+
+            }
         }
+
+
+
+        static bool IsValidSkyrimDataDirectory(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            if (!Directory.Exists(path))
+                return false;
+
+            var skyrimEsm = Path.Combine(path, "Skyrim.esm");
+            return File.Exists(skyrimEsm);
+        }
+
+
+        static string? PromptUserForDataDirectory()
+        {
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Select your Skyrim Special Edition Data folder",
+                UseDescriptionForTitle = true,
+                ShowNewFolderButton = false
+            };
+
+            var result = dialog.ShowDialog();
+
+            if (result == DialogResult.OK)
+                return dialog.SelectedPath;
+
+            return null; // user cancelled
+        }
+
+
+
+
+
+
     }
 }
