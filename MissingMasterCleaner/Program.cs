@@ -748,14 +748,47 @@ namespace MissingMasterCleaner
                 var dataDir = Path.Combine(installPath, "Data");
                 if (IsValidSkyrimDataDirectory(dataDir))
                 {
-                    LogLine($"Detected Data directory from registry: {dataDir}");
-                    LogLine("");
-                    return dataDir;
+                    // NEW: Ask user to confirm the detected path
+                    while (true)
+                    {
+                        LogLine($"Detected Data directory from registry: {dataDir}");
+                        LogLine("Is this Data directory location correct?");
+                        LogLine("1) Yes, use it");
+                        LogLine("2) No, let me choose a different location");
+                        LogLine("3) Exit");
+                        LogLine("");
+
+                        var choice = (Console.ReadLine() ?? "").Trim();
+
+                        if (choice == "1")
+                        {
+                            LogLine($"Using Data directory: {dataDir}");
+                            LogLine("");
+                            return dataDir;
+                        }
+
+                        if (choice == "2")
+                        {
+                            LogLine("OK, please choose a different Data directory.");
+                            LogLine("");
+                            break; // continue to manual selection loop below
+                        }
+
+                        if (choice == "3")
+                        {
+                            LogLine("Exiting.");
+                            Environment.Exit(0);
+                            return null; // unreachable, but keeps compiler happy
+                        }
+
+                        LogLine("Invalid choice");
+                        LogLine("");
+                    }
                 }
             }
 
-            LogLine("Skyrim SE Data directory not found automatically.");
-            LogLine("");
+            //LogLine("Skyrim SE Data directory not found automatically.");
+            //LogLine("");
 
             // 2) Manual selection loop
             while (true)
@@ -783,15 +816,8 @@ namespace MissingMasterCleaner
                     defaultButton: MessageBoxDefaultButton.Button1,
                     options: MessageBoxOptions.DefaultDesktopOnly
                 );
-
-
-
-
             }
         }
-
-
-
         static bool IsValidSkyrimDataDirectory(string path)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -803,7 +829,6 @@ namespace MissingMasterCleaner
             var skyrimEsm = Path.Combine(path, "Skyrim.esm");
             return File.Exists(skyrimEsm);
         }
-
 
         static string? PromptUserForDataDirectory()
         {
@@ -821,11 +846,6 @@ namespace MissingMasterCleaner
 
             return null; // user cancelled
         }
-
-
-
-
-
 
     }
 }
